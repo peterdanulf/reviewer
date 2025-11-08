@@ -1,0 +1,16 @@
+# Neovim
+*.swp
+*.swo
+*~
+.netrwhist
+
+# macOS
+.DS_Store
+
+# Testing
+test/
+tests/
+spec/
+
+# Logs
+*.log
