@@ -30,9 +30,13 @@ A beautiful, fast GitHub Pull Request picker for Neovim with rich previews and s
 - **Browser Integration**: Open PRs in your browser with a single keypress
 - **Git Checkout**: Checkout PR branches directly from the picker with `o`
 - **PR Creation**: Create new PRs with `<leader>go` using clean input prompts
-  - **Copilot Integration**: Automatically pre-fills title and body from git context when Copilot is available
-    - Titles are formatted as actions (imagine "This commit will " before them for consistency)
-  - Prompts for title and body (with smart defaults from commits)
+  - **AI-Powered Title/Body Generation** (Optional): Uses GitHub Copilot CLI to analyze your git diff and generate business-value focused PR titles and descriptions
+    - Analyzes the complete branch diff (all commits not yet on remote)
+    - Generates titles in imperative mood (format: "This commit will [YOUR_TITLE]")
+    - Focuses on business value and user impact, not technical implementation details
+    - Gracefully falls back to commit messages if Copilot is not available
+    - Requires: `gh extension install github/gh-copilot` and active Copilot subscription
+  - Prompts for title and body with smart defaults
   - Auto-assigns PR to you
   - Picker to select reviewer from collaborators (or skip)
   - Option to open in browser after creation
@@ -47,6 +51,13 @@ A beautiful, fast GitHub Pull Request picker for Neovim with rich previews and s
   - [nvim-telescope/telescope.nvim](https://github.com/nvim-telescope/telescope.nvim) (most popular)
   - [folke/snacks.nvim](https://github.com/folke/snacks.nvim) (modern)
 - [GitHub CLI (`gh`)](https://cli.github.com/) - Must be installed and authenticated
+
+### Optional
+
+- **GitHub Copilot CLI** - For AI-powered PR title/body generation
+  - Requires active GitHub Copilot subscription
+  - The `copilot` CLI tool must be available in your PATH
+  - Can be disabled with `use_copilot_suggestions = false` in config
 
 ## Installation
 
