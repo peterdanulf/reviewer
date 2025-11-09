@@ -1,6 +1,6 @@
 # Reviewer
 
-A beautiful, fast GitHub Pull Request picker for Neovim with rich previews and seamless checkout integration.
+A beautiful, fast GitHub Pull Request picker for Neovim with rich previews, seamless checkout integration, and AI-powered PR creation using GitHub Copilot CLI.
 
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 
