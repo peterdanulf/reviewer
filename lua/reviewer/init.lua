@@ -921,6 +921,7 @@ local pr_title_buf = nil  -- Buffer for the title dialog
 local pr_title_win = nil  -- Window for the title dialog
 local pr_suggested_body = nil  -- Store suggested body for later use
 local pr_copilot_loading = false  -- Track if Copilot is currently loading
+local pr_loading_timer = nil  -- Timer for loading animation
 
 -- ============================================================================
 -- BROWSER OPERATIONS
@@ -1041,6 +1042,13 @@ local function cancel_pr_creation()
         pcall(vim.cmd, "silent! augroup! ReviewerPRBody_" .. buf)
       end
     end
+  end
+
+  -- Stop loading animation timer if running
+  if pr_loading_timer then
+    pcall(function() pr_loading_timer:stop() end)
+    pcall(function() pr_loading_timer:close() end)
+    pr_loading_timer = nil
   end
 
   -- Clear state variables
@@ -1438,6 +1446,39 @@ local function create_body_input(title, default_body)
   })
 end
 
+---Start animated loading indicator in title dialog
+local function start_loading_animation()
+  local spinner_frames = { "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏" }
+  local frame_idx = 1
+
+  -- Stop any existing timer
+  if pr_loading_timer then
+    pcall(function() pr_loading_timer:stop() end)
+    pcall(function() pr_loading_timer:close() end)
+  end
+
+  -- Create new timer that updates every 80ms
+  pr_loading_timer = vim.loop.new_timer()
+  pr_loading_timer:start(0, 80, vim.schedule_wrap(function()
+    -- Check if still loading and dialog is valid
+    if not pr_copilot_loading or not pr_title_buf or not vim.api.nvim_buf_is_valid(pr_title_buf) then
+      if pr_loading_timer then
+        pr_loading_timer:stop()
+        pr_loading_timer:close()
+        pr_loading_timer = nil
+      end
+      return
+    end
+
+    -- Update buffer with current spinner frame
+    local spinner = spinner_frames[frame_idx]
+    safe_buf_set_lines(pr_title_buf, 0, -1, { spinner .. " Loading suggestions from Copilot..." })
+
+    -- Advance to next frame
+    frame_idx = (frame_idx % #spinner_frames) + 1
+  end))
+end
+
 ---Create a floating input for PR title
 ---@param suggested_title string Default title
 ---@param suggested_body string Default body
@@ -1449,7 +1490,7 @@ local function create_title_input(suggested_title, suggested_body, is_loading)
 
   -- Set the default content if provided
   if is_loading then
-    safe_buf_set_lines(buf, 0, -1, { "Loading suggestions from Copilot..." })
+    safe_buf_set_lines(buf, 0, -1, { "⠋ Loading suggestions from Copilot..." })
   elseif suggested_title and suggested_title ~= "" then
     safe_buf_set_lines(buf, 0, -1, { suggested_title })
   end
@@ -1521,6 +1562,11 @@ local function create_title_input(suggested_title, suggested_body, is_loading)
   pr_title_win = win
   pr_suggested_body = suggested_body
 
+  -- Start loading animation if in loading state
+  if is_loading then
+    start_loading_animation()
+  end
+
   -- Ensure window has focus and enable soft wrap
   vim.schedule(function()
     if vim.api.nvim_win_is_valid(win) then
@@ -1565,7 +1611,7 @@ local function create_title_input(suggested_title, suggested_body, is_loading)
     local title = vim.trim(table.concat(lines, " "))
 
     -- Prevent submission while loading (check state variable, not parameter)
-    if pr_copilot_loading or title == "Loading suggestions from Copilot..." then
+    if pr_copilot_loading or title:match("Loading suggestions from Copilot") then
       vim.notify("Please wait for Copilot to finish loading...", vim.log.levels.WARN)
       return
     end
@@ -1600,6 +1646,13 @@ end
 local function update_title_with_suggestions(suggested_title, suggested_body)
   -- Mark loading as complete
   pr_copilot_loading = false
+
+  -- Stop loading animation
+  if pr_loading_timer then
+    pcall(function() pr_loading_timer:stop() end)
+    pcall(function() pr_loading_timer:close() end)
+    pr_loading_timer = nil
+  end
 
   -- Check if dialog is still open and valid
   if not pr_title_buf or not vim.api.nvim_buf_is_valid(pr_title_buf) then
