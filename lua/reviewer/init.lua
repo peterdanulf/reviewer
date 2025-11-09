@@ -2666,6 +2666,7 @@ local function get_picker_adapter()
       local action_state = require("telescope.actions.state")
       local previewers = require("telescope.previewers")
 
+      -- Prefetch all PR details
       for _, pr in ipairs(prs) do
         fetch_pr_details(pr.number, function() end)
       end
@@ -2690,29 +2691,29 @@ local function get_picker_adapter()
           end,
         }),
         sorter = conf.generic_sorter({}),
-        previewer = previewers.new_buffer_previewer({
-          define_preview = function(self, entry)
+        previewer = previewers.new_termopen_previewer({
+          get_command = function(entry)
             if not entry or not entry.value then
-              return
+              return nil
             end
             local pr = entry.value
             if not pr or not pr.number then
-              return
+              return nil
             end
-            fetch_pr_details(pr.number, function(pr_data)
-              if pr_data then
-                local lines = generate_pr_preview(pr_data)
-                vim.schedule(function()
-                  if vim.api.nvim_buf_is_valid(self.state.bufnr) then
-                    safe_buf_set_lines(self.state.bufnr, 0, -1, lines)
-                    safe_buf_set_option(self.state.bufnr, "filetype", "markdown")
-                  end
-                end)
-              end
-            end)
+
+            -- Check if we have cached data
+            if pr_cache[pr.number] then
+              local lines = generate_pr_preview(pr_cache[pr.number])
+              local preview_text = table.concat(lines, "\n")
+              -- Use printf to preserve ANSI codes
+              return { "printf", "%s", preview_text }
+            else
+              -- Return loading message while we fetch
+              return { "echo", "Loading PR #" .. pr.number .. " details..." }
+            end
           end,
         }),
-        attach_mappings = function(prompt_bufnr, map)
+      attach_mappings = function(prompt_bufnr, map)
           actions.select_default:replace(function()
             actions.close(prompt_bufnr)
             local selection = action_state.get_selected_entry()
