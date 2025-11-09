@@ -1,9 +1,9 @@
 -- Reviewer - GitHub PR Picker for Neovim
 -- A beautiful, fast PR picker with rich previews
--- Supports: snacks.nvim, fzf-lua, or telescope.nvim (auto-detected, configurable)
+-- Supports: fzf-lua or telescope.nvim (auto-detected, configurable)
 
 ---@class ReviewerConfig
----@field picker_order string[] Order to detect pickers: "snacks", "fzf", "telescope"
+---@field picker_order string[] Order to detect pickers: "fzf", "telescope"
 ---@field use_copilot_suggestions boolean Automatically use Copilot for PR title/body suggestions if available
 ---@field pr_search_filter string GitHub PR search filter (see gh pr list --help for options)
 ---@field pr_limit number Limit number of PRs to fetch
@@ -32,7 +32,7 @@ local M = {}
 
 ---@type ReviewerConfig
 M.config = {
-  picker_order = { "snacks", "fzf", "telescope" },
+  picker_order = { "fzf", "telescope" },
   use_copilot_suggestions = true,
   pr_search_filter = "involves:@me state:open sort:updated-desc",
   pr_limit = 20,
@@ -77,7 +77,7 @@ function M.setup(opts)
       opts.picker_order = nil
     else
       for _, picker in ipairs(opts.picker_order) do
-        if not vim.tbl_contains({"snacks", "fzf", "telescope"}, picker) then
+        if not vim.tbl_contains({"fzf", "telescope"}, picker) then
           vim.notify("reviewer: Invalid picker in picker_order: " .. tostring(picker), vim.log.levels.ERROR)
           opts.picker_order = nil
           break
@@ -1143,22 +1143,13 @@ local function create_github_pr(title, body)
     return
   end
 
-  -- Check for uncommitted changes first
-  exec_async({ "sh", "-c", "git status --porcelain" }, function(status_result)
-    local has_changes = status_result.stdout and status_result.stdout ~= ""
+  -- Check if branch needs to be pushed
+  exec_async({ "sh", "-c", "git rev-parse --abbrev-ref HEAD" }, function(branch_result)
+    local current_branch = vim.trim(branch_result.stdout)
 
-    if has_changes then
-      vim.notify("✗ You have uncommitted changes. Please commit them first.", vim.log.levels.ERROR)
-      pr_creation_active = false
-      return
-    end
-
-    -- Check if branch needs to be pushed
-    exec_async({ "sh", "-c", "git rev-parse --abbrev-ref HEAD" }, function(branch_result)
-      local current_branch = vim.trim(branch_result.stdout)
-
-      exec_async({ "sh", "-c", "git rev-parse --abbrev-ref --symbolic-full-name @{u} 2>/dev/null || echo ''" }, function(upstream_result)
-        local has_upstream = upstream_result.stdout and vim.trim(upstream_result.stdout) ~= ""
+    -- Check if branch exists on remote by trying to get its remote ref
+    exec_async({ "sh", "-c", "git ls-remote --heads origin " .. current_branch .. " 2>/dev/null | wc -l" }, function(remote_check)
+        local branch_on_remote = vim.trim(remote_check.stdout) ~= "0"
 
         -- Helper function to actually create the PR
         local function do_create_pr()
@@ -1186,7 +1177,7 @@ local function create_github_pr(title, body)
         end
 
         -- Check if we need to push
-        if not has_upstream then
+        if not branch_on_remote then
           -- Ask user if they want to push
           vim.schedule(function()
             vim.ui.select(
@@ -1219,7 +1210,6 @@ local function create_github_pr(title, body)
         end
       end)
     end)
-  end)
 end
 
 ---Create a multiline input buffer for PR body
@@ -1575,6 +1565,13 @@ function M.create_pr()
   local is_valid, err_msg = validate_git_repo()
   if not is_valid then
     vim.notify("reviewer: " .. err_msg, vim.log.levels.ERROR)
+    return
+  end
+
+  -- Check for uncommitted changes BEFORE calling Copilot
+  local git_status = shell_exec("git status --porcelain")
+  if git_status and git_status ~= "" then
+    vim.notify("reviewer: You have uncommitted changes. Please commit or stash them before creating a PR.", vim.log.levels.ERROR)
     return
   end
 
