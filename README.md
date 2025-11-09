@@ -18,7 +18,7 @@ A beautiful, fast GitHub Pull Request picker for Neovim with rich previews and s
 
 ## Features
 
-- **Multi-Picker Support**: Auto-detects and uses fzf-lua, Telescope, or Snacks (configurable order)
+- **Multi-Picker Support**: Auto-detects and uses fzf-lua or Telescope (configurable order)
 - **Fast PR Browsing**: Quickly browse all PRs you're involved in
 - **Rich Previews**: See PR details, status, reviewers, CI checks, comments, and more
   - **Relative Timestamps**: Human-readable time format ("2 hours ago", "3 days ago")
@@ -48,15 +48,15 @@ A beautiful, fast GitHub Pull Request picker for Neovim with rich previews and s
 - Neovim >= 0.9.0
 - One of the following pickers (auto-detected):
   - [ibhagwan/fzf-lua](https://github.com/ibhagwan/fzf-lua) (recommended, fastest)
-  - [nvim-telescope/telescope.nvim](https://github.com/nvim-telescope/telescope.nvim) (most popular)
-  - [folke/snacks.nvim](https://github.com/folke/snacks.nvim) (modern)
+  - [nvim-telescope/telescope.nvim](https://github.com/nvim-telescope/telescope.nvim)
 - [GitHub CLI (`gh`)](https://cli.github.com/) - Must be installed and authenticated
 
 ### Optional
 
-- **GitHub Copilot CLI** - For AI-powered PR title/body generation
+- **GitHub Copilot in the CLI** - For AI-powered PR title/body generation
+  - Install with: `gh extension install github/gh-copilot`
   - Requires active GitHub Copilot subscription
-  - The `copilot` CLI tool must be available in your PATH
+  - Makes the `copilot` command available in your PATH
   - Can be disabled with `use_copilot_suggestions = false` in config
 
 ## Installation
@@ -68,15 +68,14 @@ A beautiful, fast GitHub Pull Request picker for Neovim with rich previews and s
   "peterdanulf/reviewer.nvim",
   -- Optional: specify your preferred picker (will auto-detect if not specified)
   dependencies = {
-    -- Pick ONE (or install multiple and Reviewer will auto-detect):
+    -- Pick ONE (or install both and Reviewer will auto-detect):
     "ibhagwan/fzf-lua",      -- Recommended
     -- "nvim-telescope/telescope.nvim",
-    -- "folke/snacks.nvim",
   },
   config = function()
     require('reviewer').setup({
       -- All options are optional, showing defaults here:
-      picker_order = { "fzf", "telescope", "snacks" },
+      picker_order = { "fzf", "telescope" },
       pr_search_filter = "involves:@me state:open sort:updated-desc",
       pr_limit = 20,
       auto_assign_to_me = true,
@@ -94,7 +93,7 @@ A beautiful, fast GitHub Pull Request picker for Neovim with rich previews and s
 ```lua
 use {
   'peterdanulf/reviewer.nvim',
-  requires = { 'ibhagwan/fzf-lua' }, -- or telescope or snacks
+  requires = { 'ibhagwan/fzf-lua' }, -- or telescope
   config = function()
     require('reviewer').setup({
       -- Configure as needed (all optional)
@@ -119,7 +118,7 @@ The plugin sets up the following keymaps:
 Once the picker is open:
 
 - `Enter` - Open selected PR(s) in browser
-- `o` - Checkout the PR branch locally (Snacks/Telescope) or `Alt+O` (fzf-lua)
+- `o` - Checkout the PR branch locally (Telescope) or `Alt+O` (fzf-lua)
 - `/` or `i` - Filter PRs by typing
 - `j/k` or `↓/↑` - Navigate through PRs
 - `Esc` or `q` - Close picker
@@ -138,8 +137,8 @@ The plugin works out of the box with sensible defaults:
 ```lua
 require('reviewer').setup({
   -- Customize picker detection order
-  -- Default: { "snacks", "fzf", "telescope" }
-  picker_order = { "fzf", "telescope", "snacks" },
+  -- Default: { "fzf", "telescope" }
+  picker_order = { "fzf", "telescope" },
 
   -- Automatically use Copilot for PR title/body suggestions if available
   -- Default: true
@@ -237,7 +236,7 @@ local reviewer = require('reviewer')
 
 -- Setup with configuration
 reviewer.setup({
-  picker_order = { "fzf", "telescope", "snacks" },
+  picker_order = { "fzf", "telescope" },
   auto_assign_to_me = true,
   -- ... other options
 })
@@ -275,7 +274,7 @@ Configure the plugin with custom options. All options are optional and will be m
 
 ```lua
 require('reviewer').setup({
-  picker_order = { "fzf", "telescope", "snacks" },
+  picker_order = { "fzf", "telescope" },
   pr_limit = 30,
   auto_assign_to_me = false,
 })
@@ -283,7 +282,7 @@ require('reviewer').setup({
 
 #### `pick_pr()`
 
-Opens the PR picker with your configured picker (fzf-lua, telescope, or snacks). Shows PRs matching your search filter with rich previews.
+Opens the PR picker with your configured picker (fzf-lua, telescope,). Shows PRs matching your search filter with rich previews.
 
 ```lua
 require('reviewer').pick_pr()
@@ -332,7 +331,7 @@ Make sure the plugin is loaded before trying to use it. If integrating with a da
 
 ### "No compatible picker found" error
 
-Install at least one of the supported pickers: fzf-lua, telescope.nvim, or snacks.nvim.
+Install at least one of the supported pickers: fzf-lua, telescope.nvim,.nvim.
 
 ### No PRs showing up
 
@@ -354,6 +353,6 @@ MIT License - see LICENSE file for details
 
 ## Credits
 
-- Supports multiple pickers: [fzf-lua](https://github.com/ibhagwan/fzf-lua), [telescope.nvim](https://github.com/nvim-telescope/telescope.nvim), [snacks.nvim](https://github.com/folke/snacks.nvim)
+- Supports multiple pickers: [fzf-lua](https://github.com/ibhagwan/fzf-lua), [telescope.nvim](https://github.com/nvim-telescope/telescope.nvim)
 - Powered by [GitHub CLI](https://cli.github.com/)
 - Inspired by modern PR workflows and developer productivity
