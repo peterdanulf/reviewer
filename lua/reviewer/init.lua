@@ -632,8 +632,31 @@ end
 ---Use GitHub Copilot to generate PR title and body from diff
 ---@param callback function(title: string, body: string) Callback with generated content
 local function generate_with_copilot(callback)
-  -- Get the diff of all commits in the branch that don't exist on remote yet
-  local diff_cmd = "git diff $(git merge-base origin/main HEAD 2>/dev/null || git merge-base main HEAD 2>/dev/null || echo 'HEAD~1')...HEAD 2>/dev/null"
+  -- Get the diff of unpushed commits only by comparing against upstream
+  -- This ensures we only see changes that haven't been pushed yet
+  -- Try to intelligently detect the base branch
+  local diff_cmd = [[
+    # First try to get unpushed commits from upstream tracking branch
+    if git rev-parse @{upstream} >/dev/null 2>&1; then
+      git diff @{upstream}...HEAD 2>/dev/null
+    # Try origin/current-branch if it exists
+    elif git rev-parse origin/$(git rev-parse --abbrev-ref HEAD) >/dev/null 2>&1; then
+      git diff origin/$(git rev-parse --abbrev-ref HEAD)...HEAD 2>/dev/null
+    # Try to detect the actual base branch by checking common remote branches
+    else
+      # Try to find which remote branch this was branched from by checking reflog
+      BASE_BRANCH=$(git reflog show --all --date=raw --format='%gd %gs' | grep -E 'branch: Created from|checkout: moving from' | head -1 | sed -n 's/.*from \([^ ]*\).*/\1/p')
+
+      # If we found a base branch in reflog, use it
+      if [ -n "$BASE_BRANCH" ] && git rev-parse "origin/$BASE_BRANCH" >/dev/null 2>&1; then
+        git diff origin/$BASE_BRANCH...HEAD 2>/dev/null
+      # Fall back to trying common base branches
+      else
+        BASE=$(git merge-base origin/main HEAD 2>/dev/null || git merge-base origin/master HEAD 2>/dev/null || git merge-base origin/develop HEAD 2>/dev/null || git merge-base main HEAD 2>/dev/null || git merge-base master HEAD 2>/dev/null || echo "HEAD~1")
+        git diff $BASE...HEAD 2>/dev/null
+      fi
+    fi
+  ]]
 
   -- First, execute the diff command to get the actual diff content
   exec_async({ "sh", "-c", diff_cmd }, function(diff_result)

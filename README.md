@@ -31,7 +31,8 @@ A beautiful, fast GitHub Pull Request picker for Neovim with rich previews and s
 - **Git Checkout**: Checkout PR branches directly from the picker with `o`
 - **PR Creation**: Create new PRs with `<leader>go` using clean input prompts
   - **AI-Powered Title/Body Generation** (Optional): Uses GitHub Copilot CLI to analyze your git diff and generate business-value focused PR titles and descriptions
-    - Analyzes the complete branch diff (all commits not yet on remote)
+    - Intelligently detects base branch from git reflog to show only relevant changes
+    - Analyzes only unpushed commits (compares against upstream tracking branch or detected base branch)
     - Generates titles in imperative mood (format: "This commit will [YOUR_TITLE]")
     - Focuses on business value and user impact, not technical implementation details
     - Gracefully falls back to commit messages if Copilot is not available
