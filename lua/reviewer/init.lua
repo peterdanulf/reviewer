@@ -917,6 +917,10 @@ end
 
 -- State management for PR creation flow
 local pr_creation_active = false
+local pr_title_buf = nil  -- Buffer for the title dialog
+local pr_title_win = nil  -- Window for the title dialog
+local pr_suggested_body = nil  -- Store suggested body for later use
+local pr_copilot_loading = false  -- Track if Copilot is currently loading
 
 -- ============================================================================
 -- BROWSER OPERATIONS
@@ -1038,6 +1042,12 @@ local function cancel_pr_creation()
       end
     end
   end
+
+  -- Clear state variables
+  pr_title_buf = nil
+  pr_title_win = nil
+  pr_suggested_body = nil
+  pr_copilot_loading = false
 
   -- Mark as inactive
   pr_creation_active = false
@@ -1431,14 +1441,16 @@ end
 ---Create a floating input for PR title
 ---@param suggested_title string Default title
 ---@param suggested_body string Default body
-local function create_title_input(suggested_title, suggested_body)
+local function create_title_input(suggested_title, suggested_body, is_loading)
   -- Create a new buffer for title input
   local buf = vim.api.nvim_create_buf(false, true)
   -- Track buffer for cleanup
   created_buffers[buf] = true
 
   -- Set the default content if provided
-  if suggested_title and suggested_title ~= "" then
+  if is_loading then
+    safe_buf_set_lines(buf, 0, -1, { "Loading suggestions from Copilot..." })
+  elseif suggested_title and suggested_title ~= "" then
     safe_buf_set_lines(buf, 0, -1, { suggested_title })
   end
 
@@ -1481,6 +1493,11 @@ local function create_title_input(suggested_title, suggested_body)
     end)
   end
 
+  -- Set window title based on loading state
+  local window_title = is_loading
+    and " PR Title - Loading from Copilot... (ESC=cancel) "
+    or " PR Title (i=edit, Enter=continue, ESC=cancel) "
+
   local ok_win, win = pcall(vim.api.nvim_open_win, buf, true, {
     relative = "editor",
     width = width,
@@ -1488,7 +1505,7 @@ local function create_title_input(suggested_title, suggested_body)
     row = row,
     col = col,
     border = "rounded",
-    title = " PR Title (i=edit, Enter=continue, ESC=cancel) ",
+    title = window_title,
     title_pos = "center"
   })
 
@@ -1498,6 +1515,11 @@ local function create_title_input(suggested_title, suggested_body)
     use_input_fallback()
     return
   end
+
+  -- Store buffer and window references for later updates
+  pr_title_buf = buf
+  pr_title_win = win
+  pr_suggested_body = suggested_body
 
   -- Ensure window has focus and enable soft wrap
   vim.schedule(function()
@@ -1542,6 +1564,12 @@ local function create_title_input(suggested_title, suggested_body)
     end
     local title = vim.trim(table.concat(lines, " "))
 
+    -- Prevent submission while loading (check state variable, not parameter)
+    if pr_copilot_loading or title == "Loading suggestions from Copilot..." then
+      vim.notify("Please wait for Copilot to finish loading...", vim.log.levels.WARN)
+      return
+    end
+
     if title == "" then
       vim.notify("Title cannot be empty", vim.log.levels.WARN)
       return
@@ -1556,7 +1584,8 @@ local function create_title_input(suggested_title, suggested_body)
       vim.schedule(function()
         -- Re-check state inside scheduled callback
         if pr_creation_active then
-          create_body_input(title, suggested_body or "")
+          -- Use pr_suggested_body from state if available, otherwise use the passed parameter
+          create_body_input(title, pr_suggested_body or suggested_body or "")
         end
       end)
     end
@@ -1565,15 +1594,47 @@ local function create_title_input(suggested_title, suggested_body)
   -- Start in normal mode (user can press 'i' to edit)
 end
 
+---Update the title dialog with Copilot suggestions
+---@param suggested_title string Suggested PR title from Copilot
+---@param suggested_body string Suggested PR body from Copilot
+local function update_title_with_suggestions(suggested_title, suggested_body)
+  -- Mark loading as complete
+  pr_copilot_loading = false
+
+  -- Check if dialog is still open and valid
+  if not pr_title_buf or not vim.api.nvim_buf_is_valid(pr_title_buf) then
+    return
+  end
+
+  if not pr_title_win or not vim.api.nvim_win_is_valid(pr_title_win) then
+    return
+  end
+
+  -- Update the buffer content with the suggestion
+  safe_buf_set_lines(pr_title_buf, 0, -1, { suggested_title })
+
+  -- Store the suggested body for later use
+  pr_suggested_body = suggested_body
+
+  -- Update the window title to remove loading indicator
+  pcall(vim.api.nvim_win_set_config, pr_title_win, {
+    title = " PR Title (i=edit, Enter=continue, ESC=cancel) ",
+  })
+
+  -- Notify the user that suggestions are ready
+  vim.notify("Copilot suggestions loaded!", vim.log.levels.INFO)
+end
+
 ---Prompt for PR details and create
 ---@param suggested_title? string Suggested PR title
 ---@param suggested_body? string Suggested PR body
-local function prompt_for_pr_details(suggested_title, suggested_body)
+---@param is_loading? boolean Whether copilot is still loading
+local function prompt_for_pr_details(suggested_title, suggested_body, is_loading)
   -- Set flow as active
   pr_creation_active = true
 
   -- Use custom floating input for title
-  create_title_input(suggested_title or "", suggested_body or "")
+  create_title_input(suggested_title or "", suggested_body or "", is_loading)
 end
 
 ---Create a new pull request
@@ -1626,12 +1687,23 @@ function M.create_pr()
     -- Check for GitHub Copilot CLI and generate defaults
     local has_copilot = vim.fn.executable('copilot') == 1 and M.config.use_copilot_suggestions
 
+    -- Show dialog immediately with loading state if using copilot
+    if has_copilot then
+      pr_copilot_loading = true  -- Set loading state
+      prompt_for_pr_details("", "", true)  -- Show loading state
+    end
+
     -- Generate PR defaults asynchronously with callback
     generate_pr_defaults(has_copilot, function(suggested_title, suggested_body)
       -- Use vim.schedule to escape fast event context
       vim.schedule(function()
-        -- Start the PR creation flow
-        prompt_for_pr_details(suggested_title, suggested_body)
+        if has_copilot then
+          -- Update the already-visible dialog with suggestions
+          update_title_with_suggestions(suggested_title, suggested_body)
+        else
+          -- Show dialog for the first time (no copilot case)
+          prompt_for_pr_details(suggested_title, suggested_body, false)
+        end
       end)
     end)
   end, 50)  -- 50ms delay to ensure cleanup completes
