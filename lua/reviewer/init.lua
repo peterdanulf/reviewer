@@ -361,9 +361,13 @@ local function is_retryable_error(stderr)
          stderr:match("rate limit")
 end
 
+-- Forward declaration for exec_async (defined later)
+local exec_async
+
 -- Helper: Schedule retry with exponential backoff
 local function schedule_retry(cmd, on_success, on_error, retry_count, delay)
-  local retry_timer = vim.defer_fn(function()
+  local retry_timer
+  retry_timer = vim.defer_fn(function()
     active_timers[retry_timer] = nil
     exec_async(cmd, on_success, on_error, retry_count + 1)
   end, delay)
@@ -431,7 +435,7 @@ end
 ---@param on_success function Success callback with result
 ---@param on_error? function Error callback with error message
 ---@param retry_count? number Current retry attempt (internal use)
-local function exec_async(cmd, on_success, on_error, retry_count)
+function exec_async(cmd, on_success, on_error, retry_count)
   retry_count = retry_count or 0
 
   local timeout_timer = nil
@@ -619,83 +623,140 @@ local function get_changed_files(limit)
   return files
 end
 
----Extract meaningful filename from path
----@param filepath string Full file path
----@return string name Extracted filename
-local function extract_filename(filepath)
-  return filepath:match("([^/]+)%.%w+$") or filepath:match("([^/]+)$") or filepath
+-- Simple shell escape function that doesn't rely on vim.fn (safe for async)
+local function shell_escape(str)
+  -- Escape single quotes by replacing ' with '\''
+  return "'" .. str:gsub("'", "'\\''") .. "'"
 end
 
----Generate title from changed files
----@param files string[] List of changed files
----@return string title Generated title
-local function generate_title_from_files(files)
-  if #files == 0 then return "" end
+---Use GitHub Copilot to generate PR title and body from diff
+---@param callback function(title: string, body: string) Callback with generated content
+local function generate_with_copilot(callback)
+  -- Get the diff of all commits in the branch that don't exist on remote yet
+  local diff_cmd = "git diff $(git merge-base origin/main HEAD 2>/dev/null || git merge-base main HEAD 2>/dev/null || echo 'HEAD~1')...HEAD 2>/dev/null"
 
-  local names = {}
-  for i, file in ipairs(files) do
-    if i > 3 then break end
-    table.insert(names, extract_filename(file))
-  end
-
-  local title = "update " .. table.concat(names, ", ", 1, math.min(#names, 2))
-  if #files > 2 then
-    title = title .. " and " .. (#files - 2) .. " more"
-  end
-
-  -- Capitalize first character
-  return title:gsub("^%l", string.upper)
-end
-
----Generate PR body with diff context
----@return string body Generated body text
-local function generate_pr_body()
-  local body = "## Summary\n\n"
-
-  -- Add diff statistics
-  local diff_summary = shell_exec("git diff --shortstat HEAD~1..HEAD 2>/dev/null || git diff --cached --shortstat 2>/dev/null") or ""
-  if diff_summary ~= "" then
-    diff_summary = vim.trim(diff_summary:gsub("[\r\n]+", " "))
-    body = body .. diff_summary .. "\n\n"
-  end
-
-  -- Add changed files list
-  local files = get_changed_files()
-  if #files > 0 then
-    body = body .. "## Files changed\n\n"
-    for i, file in ipairs(files) do
-      if i > 10 then
-        body = body .. "- ... and " .. (#files - 10) .. " more files\n"
-        break
-      end
-      body = body .. "- " .. file .. "\n"
+  -- First, execute the diff command to get the actual diff content
+  exec_async({ "sh", "-c", diff_cmd }, function(diff_result)
+    if diff_result.code ~= 0 or not diff_result.stdout or diff_result.stdout == "" then
+      vim.notify("Failed to get git diff. Using commit message.", vim.log.levels.WARN)
+      local last_commit = shell_exec("git log -1 --pretty=%s") or ""
+      callback(last_commit, "")
+      return
     end
-  end
 
-  return body
+    local diff_content = diff_result.stdout
+
+    local prompt = string.format([[Based on this git diff, generate a PR title and detailed body.
+
+Format your response EXACTLY as:
+TITLE: [your title here]
+BODY: [your body here - write 3-10 complete sentences]
+
+REQUIREMENTS:
+
+TITLE:
+- Use imperative mood (e.g., "Add feature" not "Added feature")
+- Focus on business value, not technical details
+- Be under 72 characters
+
+BODY (MUST BE 3-10 SENTENCES):
+- Write AT LEAST 3 sentences, preferably 5-10 sentences
+- First 2-3 sentences: Explain WHAT changed and WHY
+- Middle sentences: Explain the PROBLEM this solves
+- Final sentences: Describe the IMPACT and VALUE
+- Focus on user/business benefits, not technical implementation
+- Write in paragraph form with proper sentence structure
+
+Example of a good body:
+"This change improves the PR creation workflow by integrating AI-powered suggestions. Previously, users had to manually write PR titles and descriptions, which was time-consuming and often resulted in unclear descriptions. The new Copilot integration analyzes the complete git diff and generates business-focused content automatically. This saves developers time and ensures PR descriptions are clear and valuable. Teams will benefit from more consistent and professional PR documentation."
+
+Here's the diff:
+%s]], diff_content)
+
+    -- Show loading indicator
+    vim.notify("Generating PR title and body with Copilot...", vim.log.levels.INFO)
+
+    -- Call GitHub Copilot CLI
+    -- Set COPILOT_ALLOW_ALL to auto-approve tool usage without prompts
+    -- Provide stdin to prevent any interactive prompts
+    local copilot_cmd = string.format(
+      [[echo "" | COPILOT_ALLOW_ALL=true copilot -p %s --allow-all-tools 2>&1]],
+      shell_escape(prompt)
+    )
+
+  exec_async({ "sh", "-c", copilot_cmd }, function(result)
+    if result.code == 0 and result.stdout and result.stdout ~= "" then
+      local output = result.stdout
+
+      -- Parse the response - look for TITLE: and BODY: markers
+      local title = output:match("TITLE:%s*(.-)%s*\n") or output:match("TITLE:%s*(.-)%s*$") or ""
+      -- Match BODY but stop at usage stats or end of meaningful content
+      local body = output:match("BODY:%s*(.-)%s*\n\n") or output:match("BODY:%s*(.-)%s*Total usage") or output:match("BODY:%s*(.+)") or ""
+
+      -- Clean up
+      title = vim.trim(title)
+      body = vim.trim(body)
+
+      -- Remove markdown formatting
+      title = title:gsub("^%*%*", ""):gsub("%*%*$", ""):gsub("^`", ""):gsub("`$", "")
+
+      -- Post-process body: ensure line breaks between sentences
+      -- Split on sentence boundaries (. ! ?) followed by space/capital letter
+      -- and rejoin with double newlines
+      if body ~= "" then
+        -- First, normalize any existing multiple newlines to single spaces
+        body = body:gsub("\n+", " ")
+        -- Then add double newlines after sentence endings (. ! ?) followed by space
+        -- This catches most sentence boundaries
+        body = body:gsub("([.!?])%s+", "%1\n\n")
+        -- Clean up any trailing newlines
+        body = vim.trim(body)
+      end
+
+      -- Fallback if parsing failed
+      if title == "" then
+        vim.notify("Copilot response didn't match expected format. Using commit message.", vim.log.levels.WARN)
+        local last_commit = shell_exec("git log -1 --pretty=%s") or ""
+        callback(last_commit, "")
+      else
+        callback(title, body)
+      end
+    else
+      -- Fallback if Copilot fails
+      if result.code == 127 then
+        vim.notify(
+          "GitHub Copilot CLI not found. Disable with: use_copilot_suggestions = false",
+          vim.log.levels.WARN
+        )
+      else
+        vim.notify("Copilot failed (exit " .. result.code .. "). Using commit message.", vim.log.levels.WARN)
+      end
+      local last_commit = shell_exec("git log -1 --pretty=%s") or ""
+      callback(last_commit, "")
+    end
+  end, function(err)
+    vim.notify("Error calling Copilot: " .. tostring(err), vim.log.levels.WARN)
+    local last_commit = shell_exec("git log -1 --pretty=%s") or ""
+    callback(last_commit, "")
+  end)
+  end, function(err)
+    vim.notify("Error getting git diff: " .. tostring(err), vim.log.levels.WARN)
+    local last_commit = shell_exec("git log -1 --pretty=%s") or ""
+    callback(last_commit, "")
+  end)
 end
 
 ---Generate smart PR title and body from git commits
----@param with_copilot_body boolean Whether to generate body for Copilot suggestions
----@return string title, string body
-local function generate_pr_defaults(with_copilot_body)
-  if with_copilot_body then
-    -- Use diff-based generation for Copilot
-    local files = get_changed_files(3)
-    local title = generate_title_from_files(files)
-
-    -- Fallback to last commit if no title from files
-    if title == "" then
-      local last_commit = shell_exec("git log -1 --pretty=%s") or ""
-      title = (last_commit:match("^([^\n]+)") or ""):gsub("^%l", string.upper)
-    end
-
-    return title, generate_pr_body()
+---@param with_copilot boolean Whether to use Copilot for generation
+---@param callback function(title: string, body: string) Callback with generated content
+local function generate_pr_defaults(with_copilot, callback)
+  if with_copilot and M.config.use_copilot_suggestions then
+    generate_with_copilot(callback)
   else
     -- Simple title from last commit
     local last_commit_full = shell_exec("git log -1 --pretty=%B") or ""
     local title = (last_commit_full:match("^([^\n]+)") or ""):gsub("^%l", string.upper)
-    return title, ""
+    callback(title, "")
   end
 end
 
@@ -1082,7 +1143,26 @@ local function create_github_pr(title, body)
     return
   end
 
-  exec_async({ "gh", "pr", "create", "--title", tostring(title), "--body", tostring(body) }, function(result)
+  -- Check for uncommitted changes first
+  exec_async({ "sh", "-c", "git status --porcelain" }, function(status_result)
+    local has_changes = status_result.stdout and status_result.stdout ~= ""
+
+    if has_changes then
+      vim.notify("✗ You have uncommitted changes. Please commit them first.", vim.log.levels.ERROR)
+      pr_creation_active = false
+      return
+    end
+
+    -- Check if branch needs to be pushed
+    exec_async({ "sh", "-c", "git rev-parse --abbrev-ref HEAD" }, function(branch_result)
+      local current_branch = vim.trim(branch_result.stdout)
+
+      exec_async({ "sh", "-c", "git rev-parse --abbrev-ref --symbolic-full-name @{u} 2>/dev/null || echo ''" }, function(upstream_result)
+        local has_upstream = upstream_result.stdout and vim.trim(upstream_result.stdout) ~= ""
+
+        -- Helper function to actually create the PR
+        local function do_create_pr()
+          exec_async({ "gh", "pr", "create", "--title", tostring(title), "--body", tostring(body) }, function(result)
     -- Extract PR number from output
     local pr_number = result.stdout:match("https://github%.com/[^%s]+/pull/(%d+)")
         or result.stdout:match("#(%d+)")
@@ -1099,9 +1179,46 @@ local function create_github_pr(title, body)
         pr_creation_active = false
       end)
     end
-  end, function(err)
-    vim.notify("✗ Failed to create PR: " .. tostring(err or "unknown error"), vim.log.levels.ERROR)
-    pr_creation_active = false
+          end, function(err)
+            vim.notify("✗ Failed to create PR: " .. tostring(err or "unknown error"), vim.log.levels.ERROR)
+            pr_creation_active = false
+          end)
+        end
+
+        -- Check if we need to push
+        if not has_upstream then
+          -- Ask user if they want to push
+          vim.schedule(function()
+            vim.ui.select(
+              { "Yes", "No" },
+              {
+                prompt = "Branch '" .. current_branch .. "' needs to be pushed. Push now?",
+              },
+              function(choice)
+                if not choice or choice == "No" then
+                  vim.notify("PR creation cancelled.", vim.log.levels.WARN)
+                  pr_creation_active = false
+                  return
+                end
+
+                if choice == "Yes" then
+                  vim.notify("Pushing branch...", vim.log.levels.INFO)
+                  exec_async({ "sh", "-c", "git push -u origin " .. current_branch }, function()
+                    do_create_pr()
+                  end, function(err)
+                    vim.notify("✗ Failed to push: " .. tostring(err), vim.log.levels.ERROR)
+                    pr_creation_active = false
+                  end)
+                end
+              end
+            )
+          end)
+        else
+          -- Branch already pushed, create PR directly
+          do_create_pr()
+        end
+      end)
+    end)
   end)
 end
 
@@ -1486,12 +1603,17 @@ function M.create_pr()
 
   -- Add a small delay to ensure proper cleanup after cancellation
   vim.defer_fn(function()
-    -- Check for Copilot and generate defaults
-    local has_copilot = vim.fn.exists(':Copilot') == 2 and M.config.use_copilot_suggestions
-    local suggested_title, suggested_body = generate_pr_defaults(has_copilot)
+    -- Check for GitHub Copilot CLI and generate defaults
+    local has_copilot = vim.fn.executable('copilot') == 1 and M.config.use_copilot_suggestions
 
-    -- Start the PR creation flow
-    prompt_for_pr_details(suggested_title, suggested_body)
+    -- Generate PR defaults asynchronously with callback
+    generate_pr_defaults(has_copilot, function(suggested_title, suggested_body)
+      -- Use vim.schedule to escape fast event context
+      vim.schedule(function()
+        -- Start the PR creation flow
+        prompt_for_pr_details(suggested_title, suggested_body)
+      end)
+    end)
   end, 50)  -- 50ms delay to ensure cleanup completes
 end
 
