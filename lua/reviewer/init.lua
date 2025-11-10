@@ -2243,11 +2243,19 @@ local function highlight_code(text)
 end
 
 ---Helper to convert markdown links from [text](url) to text (url)
----@param text string Text containing markdown links
+---Also converts HTML anchor tags <a href="url">text</a> to text (url)
+---@param text string Text containing markdown or HTML links
 ---@return string Text with converted links
 local function convert_markdown_links(text)
   -- Replace [text](url) with text (url)
-  return text:gsub("%[([^%]]+)%]%(([^%)]+)%)", "%1 (%2)")
+  text = text:gsub("%[([^%]]+)%]%(([^%)]+)%)", "%1 (%2)")
+
+  -- Replace <a href="url">text</a> with text (url)
+  -- Handle both single and double quotes
+  text = text:gsub('<a%s+href="([^"]+)"[^>]*>([^<]+)</a>', '%2 (%1)')
+  text = text:gsub("<a%s+href='([^']+)'[^>]*>([^<]+)</a>", "%2 (%1)")
+
+  return text
 end
 
 ---Helper to wrap text at specified width, preserving ANSI codes
