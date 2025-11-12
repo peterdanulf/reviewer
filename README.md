@@ -24,7 +24,11 @@ A beautiful, fast GitHub Pull Request picker for Neovim with rich previews, seam
   - **Relative Timestamps**: Human-readable time format ("2 hours ago", "3 days ago")
   - **Visual Age Indicators**: Red highlighting for timestamps 1 week or older
   - **Clean Metadata Display**: Minimal, focused information without clutter
-- **Smart Caching**: Prefetches PR data in parallel for instant previews
+- **Smart Caching with Auto-Refresh**: Intelligent cache management for optimal UX
+  - Prefetches PR data in parallel for instant previews
+  - Automatically detects PR updates in the background
+  - Only reopens picker when necessary (status changes, currently viewing updated PR)
+  - Silently updates cache when changes don't affect current view
 - **Review Status Icons**: Visual indicators for approved, changes requested, and pending reviews
 - **Configurable Comment Filtering**: Choose to show only unresolved comments or all comments
 - **Browser Integration**: Open PRs in your browser with a single keypress
@@ -43,6 +47,9 @@ A beautiful, fast GitHub Pull Request picker for Neovim with rich previews, seam
   - Option to open in browser after creation
 - **Smart Comment Filtering**: Automatically filters out bot comments and test results
 - **Beautiful Formatting**: Syntax-highlighted previews with proper markdown rendering
+  - Code blocks rendered in monospace with syntax highlighting
+  - Suggestion blocks displayed cleanly without fence markers
+  - Inline code highlighted for better readability
 
 ## Requirements
 
@@ -318,11 +325,48 @@ require('reviewer').config.pr_limit = 50
 
 ## How It Works
 
+### Basic Flow
+
 1. **Fetching**: Uses `gh pr list` to fetch PRs you're involved in
 2. **Prefetching**: Immediately prefetches detailed PR data in parallel for instant previews
 3. **Caching**: Caches PR data during picker session to avoid redundant API calls
 4. **Preview**: Shows rich PR details including metadata, status checks, comments, and description
 5. **Filtering**: Automatically filters out bot comments and automated test results
+
+### Smart Cache Refresh
+
+The plugin intelligently manages cache updates to provide the best user experience:
+
+#### When You Open the Picker
+
+- **First Time**: Shows "Loading PRs..." and fetches all data
+- **Subsequent Opens**: Shows cached PRs instantly while checking for updates in the background
+
+#### Background Update Detection
+
+When the picker is open, it automatically checks for PR updates by comparing timestamps:
+
+- **Left Window Changes** (PR list icons/titles):
+  - Review status changes (✗ → ✓)
+  - PR title changes
+  - Author changes
+  - **Action**: Picker reopens to show fresh data
+
+- **Right Window Changes** (preview details only):
+  - New review comments added
+  - PR description edited
+  - New commits pushed
+  - **Action**: Cache updated silently, no disruption
+
+#### Intelligent Reopen Logic
+
+The picker only reopens when necessary:
+
+1. **Currently viewing updated PR**: If you're looking at PR #3 and it gets new comments → reopens to show fresh preview
+2. **Left window data changed**: If any PR's status icon changes → reopens to show fresh icons
+3. **Other PR updated**: If you're viewing PR #3 and PR #5 gets updated → stays open, no disruption
+
+This ensures you always see fresh data without unnecessary interruptions.
 
 ## Troubleshooting
 

@@ -1884,6 +1884,9 @@ local pr_picker_jobs = {}
 -- Track if PR picker is active to prevent race conditions
 local pr_picker_active = false
 
+-- Track currently previewed PR number (used to detect if reopen is needed)
+local currently_previewed_pr = nil
+
 -- Track concurrent fetch count for throttling
 local concurrent_fetch_count = 0
 
@@ -1910,6 +1913,17 @@ local function update_pr_cache(pr_number, data)
   while #pr_cache_order > PR_CACHE_MAX_SIZE do
     local evicted = table.remove(pr_cache_order)
     pr_cache[evicted] = nil
+  end
+end
+
+---Remove a single PR from the cache
+local function remove_from_pr_cache(pr_number)
+  pr_cache[pr_number] = nil
+  for i, num in ipairs(pr_cache_order) do
+    if num == pr_number then
+      table.remove(pr_cache_order, i)
+      break
+    end
   end
 end
 
@@ -2549,11 +2563,23 @@ local function generate_pr_preview(pr_data)
         for line in (body .. "\n"):gmatch("([^\r\n]*)\r?\n") do
           table.insert(body_lines, line)
         end
+
+        -- Process body lines, handling code blocks specially
+        local in_code_block = false
+        local code_color = "\27[90m"  -- Dark gray for code
+
         for _, line in ipairs(body_lines) do
-          if line == "" then
+          -- Check for code fence (``` with optional language)
+          if line:match("^```") then
+            in_code_block = not in_code_block
+            -- Skip the fence line entirely (don't render ``` or ```suggestion)
+          elseif line == "" then
             table.insert(lines, "")
+          elseif in_code_block then
+            -- Inside code block: render as-is without wrapping, with gray color
+            table.insert(lines, prefix_with_bar .. code_color .. line .. reset)
           else
-            -- Convert markdown links and highlight inline code in the line
+            -- Normal text: convert markdown links and highlight inline code
             local converted = convert_markdown_links(line)
             local highlighted_line = highlight_code(converted)
             -- Wrap text accounting for the visible prefix length (58 chars total - indent - "│ ")
@@ -2734,6 +2760,7 @@ local function get_picker_adapter()
         -- Simple preview function (working version)
         preview = function(selected)
           if not selected or #selected == 0 then
+            currently_previewed_pr = nil
             return ""
           end
           local entry = selected[1]
@@ -2741,9 +2768,13 @@ local function get_picker_adapter()
           -- Extract PR number from entry (format: "icon  #NUM  ...")
           local pr_num = entry:match("#(%d+)")
           if not pr_num then
+            currently_previewed_pr = nil
             return "Could not extract PR number"
           end
           pr_num = tonumber(pr_num)
+
+          -- Track which PR is currently being previewed
+          currently_previewed_pr = pr_num
 
           local pr = pr_lookup[pr_num]
           if not pr then
@@ -2858,12 +2889,17 @@ local function get_picker_adapter()
         previewer = previewers.new_termopen_previewer({
           get_command = function(entry)
             if not entry or not entry.value then
+              currently_previewed_pr = nil
               return nil
             end
             local pr = entry.value
             if not pr or not pr.number then
+              currently_previewed_pr = nil
               return nil
             end
+
+            -- Track which PR is currently being previewed
+            currently_previewed_pr = pr.number
 
             -- Check if we have cached data
             if pr_cache[pr.number] then
@@ -2978,6 +3014,9 @@ function M.pick_pr()
   -- Mark picker as active
   pr_picker_active = true
 
+  -- Reset currently previewed PR (will be set when user navigates in picker)
+  currently_previewed_pr = nil
+
   -- Don't clear cache - we'll invalidate only changed PRs
 
   -- Stop any existing picker jobs (iterate over hash table)
@@ -3079,16 +3118,10 @@ function M.pick_pr()
 
       -- Remove stale PRs from cache
       for _, pr_num in ipairs(prs_to_remove) do
-        pr_cache[pr_num] = nil
-        for i, num in ipairs(pr_cache_order) do
-          if num == pr_num then
-            table.remove(pr_cache_order, i)
-            break
-          end
-        end
+        remove_from_pr_cache(pr_num)
       end
 
-      -- If no cache, PRs need updating, or PRs were removed, refresh UI
+      -- Handle updates: fetch changed PRs, notify about changes
       if not has_cached_prs or #prs_to_fetch > 0 or #prs_to_remove > 0 then
         local fetch_count = #prs_to_fetch
 
@@ -3097,15 +3130,15 @@ function M.pick_pr()
         end
 
         -- Fetch full data for changed PRs
-        local enriched_count = 0
+        local fetch_complete_count = 0
         local total_to_fetch = #prs_to_fetch
 
-        -- Helper function to refresh the UI
-        local function refresh_ui()
+        -- Helper function to handle completion
+        local function on_fetch_complete()
           vim.schedule(function()
             pr_picker_active = false
 
-            -- Build display list from cache (which now has updated PRs)
+            -- Build display list from updated cache
             local display_prs = {}
             for _, pr_data in pairs(pr_cache) do
               table.insert(display_prs, pr_data)
@@ -3130,30 +3163,113 @@ function M.pick_pr()
               end
             end
 
+            -- Show/refresh the picker with updated data
+            -- If picker was already open, this reopens it with fresh icons/status
             adapter.show(display_prs, max_width)
-
-            -- Show notification only if we had cache (refresh case)
-            if has_cached_prs then
-              vim.notify("PR list refreshed", vim.log.levels.INFO)
-            end
           end)
         end
 
-        -- If nothing to fetch, just refresh UI (PRs were only removed)
-        if total_to_fetch == 0 then
-          refresh_ui()
-        else
+        -- Determine action based on what changed
+        if total_to_fetch > 0 then
+          -- Save old data that affects left window display (icon, title, author)
+          -- so we can detect if left window needs refresh
+          local old_left_window_data = {}
+          for _, pr_num in ipairs(prs_to_fetch) do
+            local cached = pr_cache[pr_num]
+            if cached then
+              old_left_window_data[pr_num] = {
+                reviewDecision = cached.reviewDecision,
+                title = cached.title,
+                author = cached.author and cached.author.login or nil,
+              }
+            end
+          end
+
+          -- Invalidate cache entries for PRs that need updating
+          -- This ensures fetch_pr_details will fetch fresh data instead of returning stale cache
+          for _, pr_num in ipairs(prs_to_fetch) do
+            remove_from_pr_cache(pr_num)
+          end
+
+          -- Track if any left window data changed
+          local left_window_changed = false
+
+          -- Check if the currently previewed PR is being updated
+          local currently_previewed_pr_updated = false
+          if currently_previewed_pr then
+            for _, pr_num in ipairs(prs_to_fetch) do
+              if pr_num == currently_previewed_pr then
+                currently_previewed_pr_updated = true
+                break
+              end
+            end
+          end
+
           -- Fetch updated PRs
           for _, pr_num in ipairs(prs_to_fetch) do
             fetch_pr_details(pr_num, function(pr_data)
-              enriched_count = enriched_count + 1
+              fetch_complete_count = fetch_complete_count + 1
 
-              -- When done fetching updates
-              if enriched_count == total_to_fetch then
-                refresh_ui()
+              -- Check if left window data changed for this PR
+              if pr_data then
+                local old_data = old_left_window_data[pr_num]
+                local new_data = {
+                  reviewDecision = pr_data.reviewDecision,
+                  title = pr_data.title,
+                  author = pr_data.author and pr_data.author.login or nil,
+                }
+
+                -- Compare: if any field differs, left window needs refresh
+                if not old_data or
+                   old_data.reviewDecision ~= new_data.reviewDecision or
+                   old_data.title ~= new_data.title or
+                   old_data.author ~= new_data.author then
+                  left_window_changed = true
+                end
+              elseif not old_left_window_data[pr_num] then
+                -- New PR (first time seeing it) - left window needs refresh
+                left_window_changed = true
+              end
+
+              -- When done fetching all PRs (callbacks always invoked, even on failure)
+              if fetch_complete_count == total_to_fetch then
+                -- Determine if picker needs reopening
+                local needs_reopen = not has_cached_prs or               -- First launch
+                                     left_window_changed or               -- Left window changed (icons/titles)
+                                     currently_previewed_pr_updated       -- Viewing updated PR (need fresh preview)
+
+                -- Ensure we have at least some PRs in cache before showing picker
+                if not has_cached_prs and next(pr_cache) == nil then
+                  vim.schedule(function()
+                    pr_picker_active = false
+                    vim.notify("Failed to load PR data", vim.log.levels.ERROR)
+                  end)
+                elseif needs_reopen then
+                  -- Need to refresh picker (left window changed or viewing updated PR)
+                  on_fetch_complete()
+                else
+                  -- Only right window data changed for PRs user isn't viewing
+                  -- Cache is updated, preview will show fresh data when user navigates
+                  -- No need to reopen picker - better UX!
+                  vim.schedule(function()
+                    pr_picker_active = false
+                  end)
+                end
               end
             end)
           end
+        elseif #prs_to_remove > 0 then
+          -- Only removals, no fetches needed - reopen picker to show updated list
+          if has_cached_prs then
+            vim.notify(string.format("%d PR%s removed from list", #prs_to_remove, #prs_to_remove > 1 and "s" or ""), vim.log.levels.INFO)
+          end
+          on_fetch_complete()
+        else
+          -- Defensive: first launch with empty PR list
+          -- (shouldn't happen - line 3041-3052 exits early if PR list is empty)
+          vim.schedule(function()
+            pr_picker_active = false
+          end)
         end
       else
         -- Cache is up to date, nothing to do
