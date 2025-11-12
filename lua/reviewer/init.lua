@@ -2712,7 +2712,7 @@ local function get_picker_adapter()
       -- Helper to open the fzf picker
       local function open_picker()
         fzf.fzf_exec(entries, {
-        prompt = "GitHub PRs (Tab=select, Enter=open in browser, Alt-o=checkout)> ",
+        prompt = "PRs> ",
         -- Enable multi-select with Tab
         fzf_opts = {
           ["--multi"] = "",
@@ -2721,6 +2721,8 @@ local function get_picker_adapter()
           ["--ansi"] = "",
           -- Enable preview window without wrap indicators
           ["--preview-window"] = "right:50%:wrap",
+          -- Show keybinding hints
+          ["--header"] = "Tab=select | Enter=open in browser | Alt-o=checkout",
         },
         -- Configure preview window explicitly
         winopts = {
@@ -2832,7 +2834,7 @@ local function get_picker_adapter()
       end
 
       pickers.new({}, {
-        prompt_title = "GitHub Pull Requests",
+        prompt_title = "PRs (Enter=open | Alt-o=checkout)",
         finder = finders.new_table({
           results = prs,
           entry_maker = function(pr)
@@ -2843,9 +2845,11 @@ local function get_picker_adapter()
                 ordinal = "",
               }
             end
+            -- Strip ANSI codes from display (telescope doesn't render them)
+            local display = format_pr_entry(pr, max_width):gsub("\27%[[%d;]*m", "")
             return {
               value = pr,
-              display = format_pr_entry(pr, max_width),
+              display = display,
               ordinal = (pr.number or "?") .. " " .. (pr.title or ""),
             }
           end,
@@ -2885,7 +2889,8 @@ local function get_picker_adapter()
             end
           end)
 
-          map("i", "<C-o>", function()
+          -- Alt-o to checkout (matches fzf)
+          map("i", "<M-o>", function()
             actions.close(prompt_bufnr)
             local selection = action_state.get_selected_entry()
             if selection and selection.value and selection.value.number then
@@ -2896,7 +2901,7 @@ local function get_picker_adapter()
             end
           end)
 
-          map("n", "o", function()
+          map("n", "<M-o>", function()
             actions.close(prompt_bufnr)
             local selection = action_state.get_selected_entry()
             if selection and selection.value and selection.value.number then
