@@ -2834,7 +2834,7 @@ local function get_picker_adapter()
       end
 
       pickers.new({}, {
-        prompt_title = "PRs (Enter=open | Alt-o=checkout)",
+        prompt_title = "PRs (Tab=select | Enter=open | Alt-o=checkout)",
         finder = finders.new_table({
           results = prs,
           entry_maker = function(pr)
@@ -2878,14 +2878,33 @@ local function get_picker_adapter()
           end,
         }),
       attach_mappings = function(prompt_bufnr, map)
+          -- Tab to toggle selection (matches fzf)
+          map("i", "<Tab>", actions.toggle_selection + actions.move_selection_worse)
+          map("n", "<Tab>", actions.toggle_selection + actions.move_selection_worse)
+
           actions.select_default:replace(function()
+            -- Get selections BEFORE closing
+            local picker = action_state.get_current_picker(prompt_bufnr)
+            local selections = picker:get_multi_selection()
+            local current_selection = action_state.get_selected_entry()
+
             actions.close(prompt_bufnr)
-            local selection = action_state.get_selected_entry()
-            if selection and selection.value and selection.value.number then
-              vim.fn.jobstart({ "gh", "pr", "view", tostring(selection.value.number), "--web" }, { detach = true })
-              vim.notify("Opening PR #" .. selection.value.number .. " in browser", vim.log.levels.INFO)
+
+            -- If multi-selection exists, use it; otherwise use current selection
+            if #selections > 0 then
+              for _, selection in ipairs(selections) do
+                if selection.value and selection.value.number then
+                  vim.fn.jobstart({ "gh", "pr", "view", tostring(selection.value.number), "--web" }, { detach = true })
+                end
+              end
+              vim.notify("Opening " .. #selections .. " PRs in browser", vim.log.levels.INFO)
             else
-              vim.notify("No PR selected", vim.log.levels.WARN)
+              if current_selection and current_selection.value and current_selection.value.number then
+                vim.fn.jobstart({ "gh", "pr", "view", tostring(current_selection.value.number), "--web" }, { detach = true })
+                vim.notify("Opening PR #" .. current_selection.value.number .. " in browser", vim.log.levels.INFO)
+              else
+                vim.notify("No PR selected", vim.log.levels.WARN)
+              end
             end
           end)
 
