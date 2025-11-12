@@ -290,18 +290,25 @@ local function get_review_status(pr_data)
     elseif pr_data.reviewDecision == "APPROVED" then
       return "✓", "DiagnosticOk", "Approved"
     elseif pr_data.reviewDecision == "REVIEW_REQUIRED" then
-      -- Check for unresolved comment threads (indicates changes requested)
-      if pr_data.review_comments and type(pr_data.review_comments) == "table" then
-        for _, comment in ipairs(pr_data.review_comments) do
-          if comment.in_reply_to_id == vim.NIL or not comment.in_reply_to_id then
-            return "✗", "DiagnosticError", "Changes Requested"
+      -- Only do detailed analysis if we have enriched data (reviews/review_comments)
+      -- Otherwise trust the reviewDecision field
+      if pr_data.reviews or pr_data.review_comments then
+        -- Check for unresolved comment threads (indicates changes requested)
+        if pr_data.review_comments and type(pr_data.review_comments) == "table" then
+          for _, comment in ipairs(pr_data.review_comments) do
+            if comment.in_reply_to_id == vim.NIL or not comment.in_reply_to_id then
+              return "✗", "DiagnosticError", "Changes Requested"
+            end
           end
         end
-      end
 
-      -- No unresolved comments, check individual reviews
-      local latest_reviews = get_latest_reviews(pr_data.reviews)
-      return status_from_reviews(latest_reviews)
+        -- No unresolved comments, check individual reviews
+        local latest_reviews = get_latest_reviews(pr_data.reviews)
+        return status_from_reviews(latest_reviews)
+      else
+        -- Basic data only - trust reviewDecision
+        return "○", "DiagnosticWarn", "Review Required"
+      end
     end
   end
 
@@ -2947,8 +2954,7 @@ function M.pick_pr()
   -- Mark picker as active
   pr_picker_active = true
 
-  -- Clear cache and cleanup any lingering jobs
-  clear_pr_cache()
+  -- Don't clear cache - we'll invalidate only changed PRs
 
   -- Stop any existing picker jobs (iterate over hash table)
   for job_id, _ in pairs(pr_picker_jobs) do
@@ -2960,26 +2966,60 @@ function M.pick_pr()
   fetch_queue = {}
   concurrent_fetch_count = 0
 
-  -- Fetch PRs using array form to prevent injection
-  local cmd = {
+  -- Check if we have any cached PRs to show immediately
+  local has_cached_prs = next(pr_cache) ~= nil
+
+  if has_cached_prs then
+    -- Use cached PRs
+    local display_prs = {}
+    for pr_num, pr_data in pairs(pr_cache) do
+      table.insert(display_prs, pr_data)
+    end
+
+    -- Sort by PR number descending
+    table.sort(display_prs, function(a, b)
+      return (a.number or 0) > (b.number or 0)
+    end)
+
+    -- Calculate max width
+    local max_width = 0
+    for _, p in ipairs(display_prs) do
+      local width = #tostring(p.number)
+      if width > max_width then
+        max_width = width
+      end
+    end
+
+    -- Show picker immediately with cached data
+    vim.schedule(function()
+      adapter.show(display_prs, max_width)
+    end)
+  else
+    -- No cache - show notification, picker will open when data arrives
+    vim.notify("Loading PRs...", vim.log.levels.INFO)
+  end
+
+  -- Start network request in background
+  -- First: minimal request to check timestamps
+  local check_cmd = {
     "gh", "pr", "list",
     "--search", M.config.pr_search_filter,
     "--limit", tostring(M.config.pr_limit),
-    "--json", "number,title,author,reviewDecision,state,url"
+    "--json", "number,updatedAt"
   }
 
-  local job_id = vim.fn.jobstart(cmd, {
+  local job_id = vim.fn.jobstart(check_cmd, {
     stdout_buffered = true,
     on_stdout = function(_, data)
       local json_str = table.concat(data, "")
-      local ok, prs = pcall(vim.json.decode, json_str)
+      local ok, timestamp_list = pcall(vim.json.decode, json_str)
 
-      if not ok or not prs or type(prs) ~= "table" or #prs == 0 then
+      if not ok or not timestamp_list or type(timestamp_list) ~= "table" or #timestamp_list == 0 then
         vim.schedule(function()
-          pr_picker_active = false  -- Reset picker state
+          pr_picker_active = false
           if not ok then
-            vim.notify("Failed to parse PR list: " .. (prs or "unknown error"), vim.log.levels.ERROR)
-          elseif type(prs) ~= "table" then
+            vim.notify("Failed to parse PR list: " .. (timestamp_list or "unknown error"), vim.log.levels.ERROR)
+          elseif type(timestamp_list) ~= "table" then
             vim.notify("Invalid PR list format from GitHub API", vim.log.levels.ERROR)
           else
             vim.notify("No PRs found", vim.log.levels.INFO)
@@ -2988,53 +3028,113 @@ function M.pick_pr()
         return
       end
 
-      -- Use the same fetch_pr_details() that works for preview
-      -- This ensures we get the exact same data and it gets cached
-      local enriched_prs = {}
-      local enriched_count = 0
-      local total_prs = #prs
+      -- Check which PRs need updating
+      local prs_to_fetch = {}
+      local prs_to_remove = {}
 
-      for i, pr in ipairs(prs) do
-        local index = i  -- Capture index in closure
-        fetch_pr_details(pr.number, function(pr_data)
-          if pr_data and validate_pr_list_item(pr_data) then
-            enriched_prs[index] = pr_data
+      for _, pr_info in ipairs(timestamp_list) do
+        local cached = pr_cache[pr_info.number]
+        if not cached or not cached.updatedAt or cached.updatedAt ~= pr_info.updatedAt then
+          table.insert(prs_to_fetch, pr_info.number)
+        end
+      end
+
+      -- Find PRs in cache that no longer exist in the list
+      for pr_num, _ in pairs(pr_cache) do
+        local found = false
+        for _, pr_info in ipairs(timestamp_list) do
+          if pr_info.number == pr_num then
+            found = true
+            break
           end
+        end
+        if not found then
+          table.insert(prs_to_remove, pr_num)
+        end
+      end
 
-          enriched_count = enriched_count + 1
+      -- Remove stale PRs from cache
+      for _, pr_num in ipairs(prs_to_remove) do
+        pr_cache[pr_num] = nil
+        for i, num in ipairs(pr_cache_order) do
+          if num == pr_num then
+            table.remove(pr_cache_order, i)
+            break
+          end
+        end
+      end
 
-          -- Once all PRs are fetched, show picker
-          if enriched_count == total_prs then
-            -- Filter out nil entries and build final list
-            local valid_prs = {}
-            for i = 1, total_prs do
-              if enriched_prs[i] then
-                table.insert(valid_prs, enriched_prs[i])
-              end
+      -- If no cache, PRs need updating, or PRs were removed, refresh UI
+      if not has_cached_prs or #prs_to_fetch > 0 or #prs_to_remove > 0 then
+        local fetch_count = #prs_to_fetch
+
+        if has_cached_prs and fetch_count > 0 then
+          vim.notify(string.format("Refreshing %d updated PR%s...", fetch_count, fetch_count > 1 and "s" or ""), vim.log.levels.INFO)
+        end
+
+        -- Fetch full data for changed PRs
+        local enriched_count = 0
+        local total_to_fetch = #prs_to_fetch
+
+        -- Helper function to refresh the UI
+        local function refresh_ui()
+          vim.schedule(function()
+            pr_picker_active = false
+
+            -- Build display list from cache (which now has updated PRs)
+            local display_prs = {}
+            for _, pr_data in pairs(pr_cache) do
+              table.insert(display_prs, pr_data)
             end
 
-            if #valid_prs == 0 then
-              vim.schedule(function()
-                pr_picker_active = false
-                vim.notify("No valid PRs found", vim.log.levels.ERROR)
-              end)
+            -- Sort by PR number descending
+            table.sort(display_prs, function(a, b)
+              return (a.number or 0) > (b.number or 0)
+            end)
+
+            if #display_prs == 0 then
+              vim.notify("No PRs found", vim.log.levels.INFO)
               return
             end
 
-            -- Calculate max width for PR numbers
+            -- Calculate max width
             local max_width = 0
-            for _, p in ipairs(valid_prs) do
+            for _, p in ipairs(display_prs) do
               local width = #tostring(p.number)
               if width > max_width then
                 max_width = width
               end
             end
 
-            vim.schedule(function()
-              pr_picker_active = false
-              adapter.show(valid_prs, max_width)
+            adapter.show(display_prs, max_width)
+
+            -- Show notification only if we had cache (refresh case)
+            if has_cached_prs then
+              vim.notify("PR list refreshed", vim.log.levels.INFO)
+            end
+          end)
+        end
+
+        -- If nothing to fetch, just refresh UI (PRs were only removed)
+        if total_to_fetch == 0 then
+          refresh_ui()
+        else
+          -- Fetch updated PRs
+          for _, pr_num in ipairs(prs_to_fetch) do
+            fetch_pr_details(pr_num, function(pr_data)
+              enriched_count = enriched_count + 1
+
+              -- When done fetching updates
+              if enriched_count == total_to_fetch then
+                refresh_ui()
+              end
             end)
           end
+        end
+      else
+        -- Cache is up to date, nothing to do
+        vim.schedule(function()
+          pr_picker_active = false
         end)
       end
     end,
