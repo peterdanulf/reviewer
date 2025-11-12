@@ -20,6 +20,14 @@ A beautiful, fast GitHub Pull Request picker for Neovim with rich previews, seam
 
 - **Multi-Picker Support**: Auto-detects and uses fzf-lua or Telescope (configurable order)
 - **Fast PR Browsing**: Quickly browse all PRs you're involved in
+- **Flexible PR Filters**: Switch between predefined views with `Alt+F`
+  - Awaiting My Review - default
+  - My Open PRs
+  - Recently Merged (all PRs, last 30 days with dynamic date filtering)
+  - All Open PRs in repo
+  - All Draft PRs in repo
+  - Fully configurable default filter
+  - Support for dynamic filters (e.g., automatic date calculations)
 - **Rich Previews**: See PR details, status, reviewers, CI checks, comments, and more
   - **Relative Timestamps**: Human-readable time format ("2 hours ago", "3 days ago")
   - **Visual Age Indicators**: Red highlighting for timestamps 1 week or older
@@ -127,6 +135,7 @@ Once the picker is open:
 
 - `Enter` - Open selected PR(s) in browser
 - `o` - Checkout the PR branch locally (Telescope) or `Alt+O` (fzf-lua)
+- `Alt+F` - Change filter (Open PRs, Merged PRs, Drafts, etc.)
 - `/` or `i` - Filter PRs by typing
 - `j/k` or `↓/↑` - Navigate through PRs
 - `Esc` or `q` - Close picker
@@ -154,7 +163,52 @@ require('reviewer').setup({
 
   -- GitHub PR search filter (see gh pr list --help for options)
   -- Default: "involves:@me state:open sort:updated-desc"
+  -- Note: This is overridden by the default filter in pr_filters
   pr_search_filter = "involves:@me state:open sort:updated-desc",
+
+  -- Predefined PR filters (switch with Alt+F in picker)
+  -- Each filter has: name, filter (gh pr list search), description, default (boolean)
+  -- The filter marked as default=true will be used when opening the picker
+  -- Default: 5 predefined filters (see below)
+  pr_filters = {
+    {
+      name = "Awaiting My Review",
+      filter = "review-requested:@me state:open sort:updated-desc",
+      description = "PRs where you're requested as a reviewer",
+      default = true,
+    },
+    {
+      name = "My Open PRs",
+      filter = "author:@me state:open sort:updated-desc",
+      description = "PRs you authored that are still open",
+      default = false,
+    },
+    {
+      name = "Recently Merged (30 days)",
+      filter = "state:merged sort:updated-desc",
+      description = "All PRs that were merged in the last 30 days",
+      default = false,
+      -- Dynamic filter that calculates date 30 days ago
+      dynamic_filter = function()
+        local days_ago = 30
+        local seconds_ago = days_ago * 24 * 60 * 60
+        local date = os.date("%Y-%m-%d", os.time() - seconds_ago)
+        return "state:merged merged:>=" .. date .. " sort:updated-desc"
+      end,
+    },
+    {
+      name = "All Open PRs",
+      filter = "state:open -is:draft sort:updated-desc",
+      description = "All open PRs in the repository (excluding drafts)",
+      default = false,
+    },
+    {
+      name = "Draft PRs",
+      filter = "is:draft sort:updated-desc",
+      description = "All draft PRs in the repository",
+      default = false,
+    },
+  },
 
   -- Limit number of PRs to fetch
   -- Default: 20
@@ -187,23 +241,42 @@ require('reviewer').setup({
 
 ### Configuration Examples
 
-#### PR Search Filters
+#### PR Filters
+
+Customize the predefined filters or add your own:
 
 ```lua
--- Show only PRs you authored
+-- Add a custom filter for urgent PRs
+pr_filters = {
+  {
+    name = "Urgent PRs",
+    filter = "involves:@me state:open label:urgent sort:updated-desc",
+    description = "Open PRs with urgent label",
+    default = true,  -- Make this the default view
+  },
+  {
+    name = "Recently Merged (7 days)",
+    filter = "involves:@me state:merged sort:updated-desc merged:>7-days-ago",
+    description = "PRs merged in the last week",
+    default = false,
+  },
+  -- Add more custom filters as needed
+}
+
+-- Or keep the defaults and just change which one is default
+pr_filters = {
+  -- ... copy default filters from setup() docs above ...
+  -- Just change default = true on the filter you want as default
+}
+```
+
+#### Legacy PR Search Filter
+
+If you prefer the old single-filter approach, you can still use `pr_search_filter`:
+
+```lua
+-- Note: This is overridden by pr_filters if both are specified
 pr_search_filter = "author:@me state:open sort:updated-desc"
-
--- Show PRs where you're requested as reviewer
-pr_search_filter = "review-requested:@me state:open sort:updated-desc"
-
--- Show all open PRs in the repo
-pr_search_filter = "state:open sort:updated-desc"
-
--- Show PRs with specific labels
-pr_search_filter = "involves:@me state:open label:bug,urgent sort:updated-desc"
-
--- Show draft PRs you're involved in
-pr_search_filter = "involves:@me draft:true sort:updated-desc"
 ```
 
 #### Reviewer Management

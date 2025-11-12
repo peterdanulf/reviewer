@@ -53,7 +53,50 @@ M.config = {
   retry_delay = 1000,
   -- Rate limit delay (milliseconds)
   rate_limit_delay = 5000,
+  -- Predefined PR filters for quick switching
+  pr_filters = {
+    {
+      name = "Awaiting My Review",
+      filter = "review-requested:@me state:open sort:updated-desc",
+      description = "PRs where you're requested as a reviewer",
+      default = true,
+    },
+    {
+      name = "My Open PRs",
+      filter = "author:@me state:open sort:updated-desc",
+      description = "PRs you authored that are still open",
+      default = false,
+    },
+    {
+      name = "Recently Merged (30 days)",
+      filter = "state:merged sort:updated-desc",
+      description = "All PRs that were merged in the last 30 days",
+      default = false,
+      dynamic_filter = function()
+        -- Calculate date 30 days ago
+        local days_ago = 30
+        local seconds_ago = days_ago * 24 * 60 * 60
+        local date = os.date("%Y-%m-%d", os.time() - seconds_ago)
+        return "state:merged merged:>=" .. date .. " sort:updated-desc"
+      end,
+    },
+    {
+      name = "All Open PRs",
+      filter = "state:open -is:draft sort:updated-desc",
+      description = "All open PRs in the repository (excluding drafts)",
+      default = false,
+    },
+    {
+      name = "Draft PRs",
+      filter = "is:draft sort:updated-desc",
+      description = "All draft PRs in the repository",
+      default = false,
+    },
+  },
 }
+
+-- Track current filter index (initialized in setup())
+local current_filter_idx = nil
 
 -- Helper function to validate a single config option
 local function validate_opt(opts, key, validator, err_msg)
@@ -134,7 +177,71 @@ function M.setup(opts)
     function(v) return type(v) == "boolean" end,
     "show_only_unresolved_review_comments must be a boolean")
 
+  -- Validate pr_filters structure
+  if opts.pr_filters then
+    if type(opts.pr_filters) ~= "table" then
+      vim.notify("reviewer: pr_filters must be a table", vim.log.levels.ERROR)
+      opts.pr_filters = nil
+    else
+      for i, filter in ipairs(opts.pr_filters) do
+        if type(filter) ~= "table" then
+          vim.notify("reviewer: pr_filters[" .. i .. "] must be a table", vim.log.levels.ERROR)
+          opts.pr_filters = nil
+          break
+        end
+        if not filter.name or type(filter.name) ~= "string" then
+          vim.notify("reviewer: pr_filters[" .. i .. "] missing required 'name' field (string)", vim.log.levels.ERROR)
+          opts.pr_filters = nil
+          break
+        end
+        if not filter.filter or type(filter.filter) ~= "string" then
+          vim.notify("reviewer: pr_filters[" .. i .. "] missing required 'filter' field (string)", vim.log.levels.ERROR)
+          opts.pr_filters = nil
+          break
+        end
+        if not filter.description or type(filter.description) ~= "string" then
+          vim.notify("reviewer: pr_filters[" .. i .. "] missing required 'description' field (string)", vim.log.levels.ERROR)
+          opts.pr_filters = nil
+          break
+        end
+      end
+    end
+  end
+
   M.config = vim.tbl_deep_extend("force", M.config, opts)
+
+  -- Initialize current_filter_idx from default filter
+  if not current_filter_idx then
+    for i, filter in ipairs(M.config.pr_filters) do
+      if filter.default then
+        current_filter_idx = i
+        -- Use dynamic_filter if available, otherwise use static filter
+        if filter.dynamic_filter and type(filter.dynamic_filter) == "function" then
+          M.config.pr_search_filter = filter.dynamic_filter()
+        else
+          M.config.pr_search_filter = filter.filter
+        end
+        break
+      end
+    end
+
+    -- Fallback to first filter if no default specified
+    if not current_filter_idx then
+      if #M.config.pr_filters > 0 then
+        current_filter_idx = 1
+        local first_filter = M.config.pr_filters[1]
+        -- Use dynamic_filter if available, otherwise use static filter
+        if first_filter.dynamic_filter and type(first_filter.dynamic_filter) == "function" then
+          M.config.pr_search_filter = first_filter.dynamic_filter()
+        else
+          M.config.pr_search_filter = first_filter.filter
+        end
+      else
+        -- No filters configured - this shouldn't happen with default config
+        vim.notify("reviewer: No PR filters configured, using default search filter", vim.log.levels.WARN)
+      end
+    end
+  end
 end
 
 -- ============================================================================
@@ -2699,6 +2806,63 @@ local function checkout_pr(pr_number)
   vim.notify("Checking out PR #" .. pr_number, vim.log.levels.INFO)
 end
 
+---Apply selected filter and reopen picker
+---@param filter_obj table Filter object from pr_filters
+---@param filter_idx number Index of the filter in pr_filters
+local function apply_filter(filter_obj, filter_idx)
+  if not filter_obj or not filter_idx then
+    return
+  end
+
+  -- Update current filter
+  current_filter_idx = filter_idx
+
+  -- Use dynamic_filter if available, otherwise use static filter
+  if filter_obj.dynamic_filter and type(filter_obj.dynamic_filter) == "function" then
+    M.config.pr_search_filter = filter_obj.dynamic_filter()
+  else
+    M.config.pr_search_filter = filter_obj.filter
+  end
+
+  -- Keep pr_cache intact - PR details are filter-independent
+  -- Only the PR list changes, which will be fetched with new filter
+
+  -- Reopen picker with new filter (cache will be reused for matching PRs)
+  M.pick_pr()
+end
+
+---Show filter picker for selecting PR view
+---@param on_select_callback function Callback to invoke after selection
+local function show_filter_picker(on_select_callback)
+  local filters = M.config.pr_filters
+  if not filters or #filters == 0 then
+    vim.notify("No PR filters configured", vim.log.levels.WARN)
+    return
+  end
+
+  -- Ensure current_filter_idx is valid
+  if not current_filter_idx or not filters[current_filter_idx] then
+    current_filter_idx = 1
+  end
+
+  -- Build items with current filter marker
+  local items = {}
+  for i, filter in ipairs(filters) do
+    local marker = (i == current_filter_idx) and "[✓] " or "[ ] "
+    local item = marker .. filter.name .. " - " .. filter.description
+    table.insert(items, item)
+  end
+
+  vim.ui.select(items, {
+    prompt = "Select PR Filter:",
+    kind = "reviewer_filter",
+  }, function(choice, idx)
+    if idx and on_select_callback then
+      on_select_callback(filters[idx], idx)
+    end
+  end)
+end
+
 ---Get available picker adapter
 ---@return PickerAdapter? adapter
 local function get_picker_adapter()
@@ -2737,8 +2901,13 @@ local function get_picker_adapter()
 
       -- Helper to open the fzf picker
       local function open_picker()
+        -- Ensure current_filter_idx is valid
+        if not current_filter_idx or not M.config.pr_filters[current_filter_idx] then
+          current_filter_idx = 1
+        end
+        local current_filter_name = M.config.pr_filters[current_filter_idx].name
         fzf.fzf_exec(entries, {
-        prompt = "PRs> ",
+        prompt = current_filter_name .. "> ",
         -- Enable multi-select with Tab
         fzf_opts = {
           ["--multi"] = "",
@@ -2748,7 +2917,7 @@ local function get_picker_adapter()
           -- Enable preview window without wrap indicators
           ["--preview-window"] = "right:50%:wrap",
           -- Show keybinding hints
-          ["--header"] = "Tab=select | Enter=open in browser | Alt-o=checkout",
+          ["--header"] = "Tab=select | Enter=open | Alt-o=checkout | Alt-f=change filter",
         },
         -- Configure preview window explicitly
         winopts = {
@@ -2825,6 +2994,9 @@ local function get_picker_adapter()
               end
             end
           end,
+          ["alt-f"] = function(selected)
+            show_filter_picker(apply_filter)
+          end,
         },
       })
       end
@@ -2864,8 +3036,13 @@ local function get_picker_adapter()
         fetch_pr_details(pr.number, function() end)
       end
 
+      -- Ensure current_filter_idx is valid
+      if not current_filter_idx or not M.config.pr_filters[current_filter_idx] then
+        current_filter_idx = 1
+      end
+      local current_filter_name = M.config.pr_filters[current_filter_idx].name
       pickers.new({}, {
-        prompt_title = "PRs (Tab=select | Enter=open | Alt-o=checkout)",
+        prompt_title = current_filter_name .. " (Tab=select | Enter=open | Alt-o=checkout | Alt-f=filter)",
         finder = finders.new_table({
           results = prs,
           entry_maker = function(pr)
@@ -2967,6 +3144,17 @@ local function get_picker_adapter()
             end
           end)
 
+          -- Alt-f to change filter (matches fzf)
+          map("i", "<M-f>", function()
+            actions.close(prompt_bufnr)
+            show_filter_picker(apply_filter)
+          end)
+
+          map("n", "<M-f>", function()
+            actions.close(prompt_bufnr)
+            show_filter_picker(apply_filter)
+          end)
+
           return true
         end,
       }):find()
@@ -3029,60 +3217,27 @@ function M.pick_pr()
   fetch_queue = {}
   concurrent_fetch_count = 0
 
-  -- Check if we have any cached PRs to show immediately
-  local has_cached_prs = next(pr_cache) ~= nil
-
-  if has_cached_prs then
-    -- Use cached PRs
-    local display_prs = {}
-    for pr_num, pr_data in pairs(pr_cache) do
-      table.insert(display_prs, pr_data)
-    end
-
-    -- Sort by PR number descending
-    table.sort(display_prs, function(a, b)
-      return (a.number or 0) > (b.number or 0)
-    end)
-
-    -- Calculate max width
-    local max_width = 0
-    for _, p in ipairs(display_prs) do
-      local width = #tostring(p.number)
-      if width > max_width then
-        max_width = width
-      end
-    end
-
-    -- Show picker immediately with cached data
-    vim.schedule(function()
-      adapter.show(display_prs, max_width)
-    end)
-  else
-    -- No cache - show notification, picker will open when data arrives
-    vim.notify("Loading PRs...", vim.log.levels.INFO)
-  end
-
-  -- Start network request in background
-  -- First: minimal request to check timestamps
-  local check_cmd = {
+  -- Start network request to get PR list for current filter
+  -- This is fast (only fetches numbers and timestamps)
+  local list_cmd = {
     "gh", "pr", "list",
     "--search", M.config.pr_search_filter,
     "--limit", tostring(M.config.pr_limit),
     "--json", "number,updatedAt"
   }
 
-  local job_id = vim.fn.jobstart(check_cmd, {
+  local job_id = vim.fn.jobstart(list_cmd, {
     stdout_buffered = true,
     on_stdout = function(_, data)
       local json_str = table.concat(data, "")
-      local ok, timestamp_list = pcall(vim.json.decode, json_str)
+      local ok, pr_list = pcall(vim.json.decode, json_str)
 
-      if not ok or not timestamp_list or type(timestamp_list) ~= "table" or #timestamp_list == 0 then
+      if not ok or not pr_list or type(pr_list) ~= "table" or #pr_list == 0 then
         vim.schedule(function()
           pr_picker_active = false
           if not ok then
-            vim.notify("Failed to parse PR list: " .. (timestamp_list or "unknown error"), vim.log.levels.ERROR)
-          elseif type(timestamp_list) ~= "table" then
+            vim.notify("Failed to parse PR list: " .. (pr_list or "unknown error"), vim.log.levels.ERROR)
+          elseif type(pr_list) ~= "table" then
             vim.notify("Invalid PR list format from GitHub API", vim.log.levels.ERROR)
           else
             vim.notify("No PRs found", vim.log.levels.INFO)
@@ -3091,190 +3246,129 @@ function M.pick_pr()
         return
       end
 
-      -- Check which PRs need updating
-      local prs_to_fetch = {}
-      local prs_to_remove = {}
+      -- Build display list from cached PRs + identify missing/stale ones
+      local display_prs = {}
+      local prs_to_fetch = {}  -- PRs not in cache at all (need full fetch)
+      local prs_to_update = {} -- PRs in cache but with outdated timestamp (need refresh)
 
-      for _, pr_info in ipairs(timestamp_list) do
+      for _, pr_info in ipairs(pr_list) do
         local cached = pr_cache[pr_info.number]
-        if not cached or not cached.updatedAt or cached.updatedAt ~= pr_info.updatedAt then
+        if cached then
+          -- Check if cache is stale
+          if cached.updatedAt ~= pr_info.updatedAt then
+            table.insert(prs_to_update, pr_info.number)
+          end
+          -- Use cached data for immediate display
+          table.insert(display_prs, cached)
+        else
+          -- Not in cache - need to fetch
           table.insert(prs_to_fetch, pr_info.number)
         end
       end
 
-      -- Find PRs in cache that no longer exist in the list
-      for pr_num, _ in pairs(pr_cache) do
-        local found = false
-        for _, pr_info in ipairs(timestamp_list) do
-          if pr_info.number == pr_num then
-            found = true
-            break
+      -- Show picker immediately with whatever we have cached
+      if #display_prs > 0 then
+        vim.schedule(function()
+          -- Sort by PR number descending
+          table.sort(display_prs, function(a, b)
+            return (a.number or 0) > (b.number or 0)
+          end)
+
+          -- Calculate max width
+          local max_width = 0
+          for _, p in ipairs(display_prs) do
+            local width = #tostring(p.number)
+            if width > max_width then
+              max_width = width
+            end
           end
-        end
-        if not found then
-          table.insert(prs_to_remove, pr_num)
-        end
+
+          adapter.show(display_prs, max_width)
+        end)
       end
 
-      -- Remove stale PRs from cache
-      for _, pr_num in ipairs(prs_to_remove) do
-        remove_from_pr_cache(pr_num)
+      -- Fetch missing and stale PRs in background
+      local total_to_fetch = #prs_to_fetch + #prs_to_update
+
+      if total_to_fetch == 0 then
+        -- Everything is cached and up-to-date
+        vim.schedule(function()
+          pr_picker_active = false
+        end)
+        return
       end
 
-      -- Handle updates: fetch changed PRs, notify about changes
-      if not has_cached_prs or #prs_to_fetch > 0 or #prs_to_remove > 0 then
-        local fetch_count = #prs_to_fetch
+      -- Notify about background fetches
+      if #prs_to_fetch > 0 then
+        vim.notify(string.format("Loading %d more PR%s...", #prs_to_fetch, #prs_to_fetch > 1 and "s" or ""), vim.log.levels.INFO)
+      end
+      if #prs_to_update > 0 then
+        vim.notify(string.format("Updating %d stale PR%s...", #prs_to_update, #prs_to_update > 1 and "s" or ""), vim.log.levels.INFO)
+      end
 
-        if has_cached_prs and fetch_count > 0 then
-          vim.notify(string.format("Refreshing %d updated PR%s...", fetch_count, fetch_count > 1 and "s" or ""), vim.log.levels.INFO)
-        end
+      -- Combine lists for fetching
+      local all_to_fetch = {}
+      for _, pr_num in ipairs(prs_to_fetch) do
+        table.insert(all_to_fetch, pr_num)
+      end
+      for _, pr_num in ipairs(prs_to_update) do
+        table.insert(all_to_fetch, pr_num)
+      end
 
-        -- Fetch full data for changed PRs
-        local fetch_complete_count = 0
-        local total_to_fetch = #prs_to_fetch
+      -- Track completion
+      local fetch_complete_count = 0
 
-        -- Helper function to handle completion
-        local function on_fetch_complete()
-          vim.schedule(function()
+      -- Helper function to handle completion
+      local function on_fetch_complete()
+        vim.schedule(function()
+          fetch_complete_count = fetch_complete_count + 1
+
+          if fetch_complete_count >= total_to_fetch then
             pr_picker_active = false
 
-            -- Build display list from updated cache
-            local display_prs = {}
-            for _, pr_data in pairs(pr_cache) do
-              table.insert(display_prs, pr_data)
+            -- Build final display list from all PRs in current filter
+            local final_display_prs = {}
+            for _, pr_info in ipairs(pr_list) do
+              if pr_cache[pr_info.number] then
+                table.insert(final_display_prs, pr_cache[pr_info.number])
+              end
             end
 
             -- Sort by PR number descending
-            table.sort(display_prs, function(a, b)
+            table.sort(final_display_prs, function(a, b)
               return (a.number or 0) > (b.number or 0)
             end)
 
-            if #display_prs == 0 then
+            if #final_display_prs == 0 then
               vim.notify("No PRs found", vim.log.levels.INFO)
               return
             end
 
             -- Calculate max width
             local max_width = 0
-            for _, p in ipairs(display_prs) do
+            for _, p in ipairs(final_display_prs) do
               local width = #tostring(p.number)
               if width > max_width then
                 max_width = width
               end
             end
 
-            -- Show/refresh the picker with updated data
-            -- If picker was already open, this reopens it with fresh icons/status
-            adapter.show(display_prs, max_width)
-          end)
-        end
-
-        -- Determine action based on what changed
-        if total_to_fetch > 0 then
-          -- Save old data that affects left window display (icon, title, author)
-          -- so we can detect if left window needs refresh
-          local old_left_window_data = {}
-          for _, pr_num in ipairs(prs_to_fetch) do
-            local cached = pr_cache[pr_num]
-            if cached then
-              old_left_window_data[pr_num] = {
-                reviewDecision = cached.reviewDecision,
-                title = cached.title,
-                author = cached.author and cached.author.login or nil,
-              }
-            end
+            -- Reopen picker with complete data
+            adapter.show(final_display_prs, max_width)
           end
+        end)
+      end
 
-          -- Invalidate cache entries for PRs that need updating
-          -- This ensures fetch_pr_details will fetch fresh data instead of returning stale cache
-          for _, pr_num in ipairs(prs_to_fetch) do
-            remove_from_pr_cache(pr_num)
-          end
+      -- Invalidate stale cache entries before fetching
+      for _, pr_num in ipairs(prs_to_update) do
+        remove_from_pr_cache(pr_num)
+      end
 
-          -- Track if any left window data changed
-          local left_window_changed = false
-
-          -- Check if the currently previewed PR is being updated
-          local currently_previewed_pr_updated = false
-          if currently_previewed_pr then
-            for _, pr_num in ipairs(prs_to_fetch) do
-              if pr_num == currently_previewed_pr then
-                currently_previewed_pr_updated = true
-                break
-              end
-            end
-          end
-
-          -- Fetch updated PRs
-          for _, pr_num in ipairs(prs_to_fetch) do
-            fetch_pr_details(pr_num, function(pr_data)
-              fetch_complete_count = fetch_complete_count + 1
-
-              -- Check if left window data changed for this PR
-              if pr_data then
-                local old_data = old_left_window_data[pr_num]
-                local new_data = {
-                  reviewDecision = pr_data.reviewDecision,
-                  title = pr_data.title,
-                  author = pr_data.author and pr_data.author.login or nil,
-                }
-
-                -- Compare: if any field differs, left window needs refresh
-                if not old_data or
-                   old_data.reviewDecision ~= new_data.reviewDecision or
-                   old_data.title ~= new_data.title or
-                   old_data.author ~= new_data.author then
-                  left_window_changed = true
-                end
-              elseif not old_left_window_data[pr_num] then
-                -- New PR (first time seeing it) - left window needs refresh
-                left_window_changed = true
-              end
-
-              -- When done fetching all PRs (callbacks always invoked, even on failure)
-              if fetch_complete_count == total_to_fetch then
-                -- Determine if picker needs reopening
-                local needs_reopen = not has_cached_prs or               -- First launch
-                                     left_window_changed or               -- Left window changed (icons/titles)
-                                     currently_previewed_pr_updated       -- Viewing updated PR (need fresh preview)
-
-                -- Ensure we have at least some PRs in cache before showing picker
-                if not has_cached_prs and next(pr_cache) == nil then
-                  vim.schedule(function()
-                    pr_picker_active = false
-                    vim.notify("Failed to load PR data", vim.log.levels.ERROR)
-                  end)
-                elseif needs_reopen then
-                  -- Need to refresh picker (left window changed or viewing updated PR)
-                  on_fetch_complete()
-                else
-                  -- Only right window data changed for PRs user isn't viewing
-                  -- Cache is updated, preview will show fresh data when user navigates
-                  -- No need to reopen picker - better UX!
-                  vim.schedule(function()
-                    pr_picker_active = false
-                  end)
-                end
-              end
-            end)
-          end
-        elseif #prs_to_remove > 0 then
-          -- Only removals, no fetches needed - reopen picker to show updated list
-          if has_cached_prs then
-            vim.notify(string.format("%d PR%s removed from list", #prs_to_remove, #prs_to_remove > 1 and "s" or ""), vim.log.levels.INFO)
-          end
+      -- Fetch all missing and stale PRs
+      for _, pr_num in ipairs(all_to_fetch) do
+        fetch_pr_details(pr_num, function(pr_data)
+          -- Call completion handler (counts fetches and reopens picker when done)
           on_fetch_complete()
-        else
-          -- Defensive: first launch with empty PR list
-          -- (shouldn't happen - line 3041-3052 exits early if PR list is empty)
-          vim.schedule(function()
-            pr_picker_active = false
-          end)
-        end
-      else
-        -- Cache is up to date, nothing to do
-        vim.schedule(function()
-          pr_picker_active = false
         end)
       end
     end,
